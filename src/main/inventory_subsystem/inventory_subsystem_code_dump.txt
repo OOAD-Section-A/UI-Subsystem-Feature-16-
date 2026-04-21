@@ -1,0 +1,843 @@
+===== FILE: AddStockStrategy.java =====
+package inventory_subsystem;
+
+import java.time.LocalDateTime;
+import java.util.*;
+
+public class AddStockStrategy implements StockOperationStrategy {
+
+    @Override
+    public void execute(String sku, String locationId, String supplierId, int quantity,
+                        InventoryDataStore repository,
+                        InventoryExceptionSource exceptionSource,
+                        IssuingPolicy policy) {
+
+        if (quantity <= 0) {
+            exceptionSource.fireConflict(
+                    168, "StockOperation",
+                    sku, "Invalid quantity: " + quantity);
+            return;
+        }
+
+        InventoryItem item = repository.find(sku, locationId, supplierId);
+
+        if (item == null) {
+            item = new InventoryItem(sku, locationId, supplierId, quantity);
+        } else {
+            item.addBatch(new InventoryBatch(
+                    UUID.randomUUID().toString(),
+                    quantity,
+                    LocalDateTime.now(),
+                    null,
+                    new ArrayList<>(),
+                    0.0
+            ));
+            item.setVersion(item.getVersion() + 1);
+        }
+
+        if (repository instanceof InventoryRepository repo) {
+            repo.recordTransaction(
+                new StockTransaction(sku, locationId, supplierId,
+                        quantity, "ADD")
+            );
+        }
+
+        repository.save(item);
+
+        if (item.getTotalQuantity() < item.getReorderThreshold()) {
+            exceptionSource.fireResourceExhausted(
+                    200,
+                    "ReorderTrigger",
+                    sku,
+                    item.getReorderThreshold(),
+                    item.getTotalQuantity()
+            );
+        }
+
+        if (item.getTotalQuantity() < item.getSafetyStockLevel()) {
+            exceptionSource.fireResourceExhausted(
+                    201,
+                    "SafetyStockBreach",
+                    sku,
+                    item.getSafetyStockLevel(),
+                    item.getTotalQuantity()
+            );
+        }
+    }
+}
+
+===== FILE: InventoryBatch.java =====
+package inventory_subsystem;
+
+import java.time.LocalDateTime;
+import java.util.*;
+
+public class InventoryBatch {
+
+    private String batchId;
+    private int quantity;
+    private LocalDateTime arrivalTime;
+    private LocalDateTime expiryTime;
+
+    private List<String> serialNumbers;
+
+    private double unitCost = 0.0;
+
+    public InventoryBatch(String batchId,
+                          int quantity,
+                          LocalDateTime arrivalTime,
+                          LocalDateTime expiryTime,
+                          List<String> serialNumbers,
+                          double unitCost) {
+
+        this.batchId = batchId;
+        this.quantity = quantity;
+        this.arrivalTime = arrivalTime;
+        this.expiryTime = expiryTime;
+        this.serialNumbers = (serialNumbers != null)
+                ? serialNumbers
+                : new ArrayList<>();
+        this.unitCost = unitCost;
+    }
+
+    public String getBatchId() { return batchId; }
+    public int getQuantity() { return quantity; }
+    public LocalDateTime getArrivalTime() { return arrivalTime; }
+    public LocalDateTime getExpiryTime() { return expiryTime; }
+    public List<String> getSerialNumbers() { return serialNumbers; }
+    public double getUnitCost() {
+        return unitCost;
+    }
+
+    public void setQuantity(int quantity) { this.quantity = quantity; }
+
+    public void addSerialNumber(String serial) {
+        this.serialNumbers.add(serial);
+    }
+}
+
+===== FILE: InventoryDataStore.java =====
+package inventory_subsystem;
+
+public interface InventoryDataStore {
+
+    InventoryItem find(String sku, String locationId, String supplierId);
+
+    void save(InventoryItem item);
+
+    boolean exists(String sku, String locationId, String supplierId);
+}
+
+===== FILE: InventoryExceptionSource.java =====
+package inventory_subsystem;
+
+import com.scm.exceptions.*;
+import com.scm.exceptions.categories.*;
+
+public class InventoryExceptionSource implements
+        IResourceAvailabilityExceptionSource,
+        IConcurrencyExceptionSource {
+
+    private SCMExceptionHandler handler;
+
+    @Override
+    public void registerHandler(SCMExceptionHandler handler) {
+        this.handler = handler;
+    }
+
+    private void raise(int id, Severity severity, String detail) {
+        if (handler == null) return;
+
+        SCMExceptionEntry entry = SCMExceptionRegistry.getInstance().get(id);
+
+        handler.handle(new SCMExceptionEvent(
+                id,
+                entry.getName(),
+                severity,
+                entry.getSubsystem(),
+                entry.getErrorMessage(),
+                detail
+        ));
+    }
+
+    @Override
+    public void fireResourceNotFound(int id, String type, String resourceId) {
+        raise(id, Severity.MAJOR,
+                type + " not found: " + resourceId);
+    }
+
+    @Override
+    public void fireResourceExhausted(int id, String type,
+                                      String resourceId,
+                                      int requested, int available) {
+
+        raise(id, Severity.MAJOR,
+                type + " insufficient: " + resourceId +
+                        " requested=" + requested +
+                        " available=" + available);
+    }
+
+    @Override
+    public void fireConflict(int id, String entityType,
+                             String entityId, String reason) {
+
+        raise(id, Severity.WARNING,
+                entityType + " conflict: " + entityId +
+                        " reason=" + reason);
+    }
+}
+
+===== FILE: InventoryItem.java =====
+package inventory_subsystem;
+
+import java.util.*;
+import java.time.LocalDateTime;
+
+public class InventoryItem {
+
+    private String sku;
+    private String locationId;
+    private String supplierId;
+    private String status;
+
+    private String abcCategory = "C"; // A / B / C (default lowest priority)
+
+    private int reorderThreshold = 0;
+
+    private int safetyStockLevel = 0;
+
+    private int version;
+
+    private List<InventoryBatch> batches = new ArrayList<>();
+
+    public InventoryItem(String sku, String locationId,
+                         String supplierId, int quantity) {
+
+        this.sku = sku;
+        this.locationId = locationId;
+        this.supplierId = supplierId;
+        this.status = "AVAILABLE";
+        this.version = 0;
+
+        batches.add(new InventoryBatch(
+                UUID.randomUUID().toString(),
+                quantity,
+                LocalDateTime.now(),
+                null,
+            new ArrayList<>(),
+            0.0
+        ));
+    }
+
+    public String getSku() { return sku; }
+    public String getLocationId() { return locationId; }
+    public String getSupplierId() { return supplierId; }
+    public String getStatus() { return status; }
+    public String getAbcCategory() {
+        return abcCategory;
+    }
+
+    public void setAbcCategory(String abcCategory) {
+        this.abcCategory = abcCategory;
+    }
+
+    public int getSafetyStockLevel() {
+        return safetyStockLevel;
+    }
+
+    public void setSafetyStockLevel(int safetyStockLevel) {
+        this.safetyStockLevel = safetyStockLevel;
+    }
+
+    public int getReorderThreshold() {
+        return reorderThreshold;
+    }
+
+    public int getVersion() { return version; }
+    public List<InventoryBatch> getBatches() { return batches; }
+
+    public void setStatus(String status) { this.status = status; }
+    public void setReorderThreshold(int reorderThreshold) {
+        this.reorderThreshold = reorderThreshold;
+    }
+    public void setVersion(int version) { this.version = version; }
+
+    public void addBatch(InventoryBatch batch) { batches.add(batch); }
+
+    public int getTotalQuantity() {
+        return batches.stream().mapToInt(InventoryBatch::getQuantity).sum();
+    }
+}
+
+===== FILE: InventoryRepository.java =====
+package inventory_subsystem;
+
+import com.jackfruit.scm.database.facade.SupplyChainDatabaseFacade;
+import com.jackfruit.scm.database.adapter.InventoryAdapter;
+import com.jackfruit.scm.database.model.InventoryModels.*;
+
+import java.time.LocalDateTime;
+import java.util.*;
+
+public class InventoryRepository implements InventoryDataStore {
+
+    private final SupplyChainDatabaseFacade facade;
+    private final InventoryAdapter adapter;
+    private final InventoryExceptionSource exceptionSource;
+
+    private final Map<String, InventoryItem> localStore = new HashMap<>();
+    private final List<StockTransaction> transactions = new ArrayList<>();
+    private final Map<String, Supplier> suppliers = new HashMap<>();
+
+    public InventoryRepository(InventoryExceptionSource exceptionSource) {
+        this.facade = new SupplyChainDatabaseFacade();
+        this.adapter = new InventoryAdapter(facade);
+        this.exceptionSource = exceptionSource;
+    }
+
+    private String key(String sku, String locationId, String supplierId) {
+        return sku + "_" + locationId + "_" + supplierId;
+    }
+
+    @Override
+    public InventoryItem find(String sku, String locationId, String supplierId) {
+        return localStore.get(key(sku, locationId, supplierId));
+    }
+
+    @Override
+    public void save(InventoryItem item) {
+
+        localStore.put(key(item.getSku(), item.getLocationId(), item.getSupplierId()), item);
+
+        Product product = adapter.listProducts()
+                .stream()
+                .filter(p -> p.sku().equals(item.getSku()))
+                .findFirst()
+                .orElse(null);
+
+        if (product == null) {
+            exceptionSource.fireResourceNotFound(
+                    166, "Product", item.getSku()
+            );
+            return;
+        }
+
+        int totalQty = localStore.values().stream()
+                .filter(i -> i.getSku().equals(item.getSku()))
+                .mapToInt(InventoryItem::getTotalQuantity)
+                .sum();
+
+        StockLevel existing = adapter.listStockLevels()
+                .stream()
+                .filter(s -> s.productId().equals(product.productId()))
+                .findFirst()
+                .orElse(null);
+
+        if (existing == null) {
+
+            adapter.createStockLevel(new StockLevel(
+                    UUID.randomUUID().toString(),
+                    product.productId(),
+                    totalQty,
+                    0,
+                    totalQty,
+                    0,
+                    0,
+                    0,
+                    null,
+                    "NORMAL",
+                    null,
+                    LocalDateTime.now()
+            ));
+
+        } else {
+
+            adapter.updateStockLevel(new StockLevel(
+                    existing.stockLevelId(),
+                    product.productId(),
+                    totalQty,
+                    existing.reservedStockQty(),
+                    totalQty,
+                    existing.reorderThreshold(),
+                    existing.reorderQuantity(),
+                    existing.safetyStockLevel(),
+                    existing.zoneAssignment(),
+                    existing.stockHealthStatus(),
+                    existing.snapshotTimestamp(),
+                    LocalDateTime.now()
+            ));
+        }
+    }
+
+    @Override
+    public boolean exists(String sku, String locationId, String supplierId) {
+        return localStore.containsKey(key(sku, locationId, supplierId));
+    }
+
+    public void recordTransaction(StockTransaction tx) {
+        transactions.add(tx);
+    }
+
+    public List<StockTransaction> getTransactions() {
+        return transactions;
+    }
+
+    public void addSupplier(Supplier supplier) {
+        suppliers.put(supplier.getSupplierId(), supplier);
+    }
+
+    public Supplier getSupplier(String supplierId) {
+        return suppliers.get(supplierId);
+    }
+
+    public Collection<Supplier> getAllSuppliers() {
+        return suppliers.values();
+    }
+}
+
+===== FILE: InventoryService.java =====
+package inventory_subsystem;
+
+public class InventoryService implements InventoryUI {
+
+    private final InventoryDataStore repository;
+    private final InventoryExceptionSource exceptionSource;
+
+    private final AddStockStrategy addStrategy = new AddStockStrategy();
+    private final RemoveStockStrategy removeStrategy = new RemoveStockStrategy();
+    private final TransferStockStrategy transferStrategy = new TransferStockStrategy();
+
+    private IssuingPolicy policy = IssuingPolicy.FIFO;
+
+    public InventoryService(InventoryExceptionSource exceptionSource) {
+        this.exceptionSource = exceptionSource;
+        this.repository = new InventoryRepository(exceptionSource);
+    }
+
+    @Override
+    public void addStock(String sku, String locationId,
+                         String supplierId, int quantity) {
+
+        addStrategy.execute(
+                sku, locationId, supplierId,
+                quantity, repository, exceptionSource, policy
+        );
+    }
+
+    @Override
+    public void removeStock(String sku, String locationId,
+                            String supplierId, int quantity) {
+
+        removeStrategy.execute(
+                sku, locationId, supplierId,
+                quantity, repository, exceptionSource, policy
+        );
+    }
+
+    @Override
+    public void transferStock(String sku, String fromLocation,
+                              String toLocation, String supplierId, int quantity) {
+
+        transferStrategy.execute(
+                sku, fromLocation, supplierId,
+                quantity, repository, exceptionSource, policy
+        );
+
+        transferStrategy.addToDestination(
+                sku, toLocation, supplierId,
+                quantity, repository
+        );
+    }
+
+    @Override
+    public int getStock(String sku, String locationId, String supplierId) {
+
+        InventoryItem item = repository.find(sku, locationId, supplierId);
+
+        if (item == null) {
+            exceptionSource.fireResourceNotFound(
+                    166, "InventoryItem",
+                    sku + "_" + locationId + "_" + supplierId
+            );
+            return 0;
+        }
+
+        return item.getTotalQuantity();
+    }
+
+    public void addSupplier(String supplierId, String name,
+                            int leadTimeDays, double performanceRating) {
+
+        if (repository instanceof InventoryRepository repo) {
+            repo.addSupplier(new Supplier(
+                    supplierId, name, leadTimeDays, performanceRating
+            ));
+        }
+    }
+
+    public Supplier getSupplier(String supplierId) {
+
+        if (repository instanceof InventoryRepository repo) {
+            return repo.getSupplier(supplierId);
+        }
+
+        return null;
+    }
+
+    public int getTotalStockBySupplier(String supplierId) {
+
+        if (repository instanceof InventoryRepository repo) {
+            return repo.getTransactions()
+                    .stream()
+                    .filter(t -> t.getSupplierId().equals(supplierId))
+                    .mapToInt(StockTransaction::getQuantityChange)
+                    .sum();
+        }
+
+        return 0;
+    }
+}
+
+===== FILE: InventoryUI.java =====
+package inventory_subsystem;
+
+public interface InventoryUI {
+
+    void addStock(String sku, String locationId, String supplierId, int quantity);
+
+    void removeStock(String sku, String locationId, String supplierId, int quantity);
+
+    void transferStock(String sku, String fromLocation,
+                       String toLocation, String supplierId, int quantity);
+
+    int getStock(String sku, String locationId, String supplierId);
+}
+
+===== FILE: IssuingPolicy.java =====
+package inventory_subsystem;
+
+public enum IssuingPolicy {
+    FIFO,
+    FEFO
+}
+
+===== FILE: RemoveStockStrategy.java =====
+package inventory_subsystem;
+
+import java.util.*;
+
+public class RemoveStockStrategy implements StockOperationStrategy {
+
+    @Override
+    public void execute(String sku, String locationId, String supplierId, int quantity,
+                        InventoryDataStore repository,
+                        InventoryExceptionSource exceptionSource,
+                        IssuingPolicy policy) {
+
+        InventoryItem item = repository.find(sku, locationId, supplierId);
+
+        if (item == null) {
+            exceptionSource.fireResourceNotFound(
+                    166, "InventoryItem", sku + "_" + locationId + "_" + supplierId);
+            return;
+        }
+
+        item.getBatches().removeIf(
+                b -> b.getExpiryTime() != null &&
+                        b.getExpiryTime().isBefore(java.time.LocalDateTime.now())
+        );
+
+        if (item.getTotalQuantity() < quantity) {
+            exceptionSource.fireResourceExhausted(
+                    167, "Stock",
+                    sku + "_" + locationId + "_" + supplierId,
+                    quantity, item.getTotalQuantity());
+            return;
+        }
+
+        if (policy == IssuingPolicy.FEFO) {
+            item.getBatches().sort(
+                    Comparator.comparing(
+                            b -> b.getExpiryTime() != null
+                                    ? b.getExpiryTime()
+                                    : b.getArrivalTime()
+                    )
+            );
+        } else {
+            item.getBatches().sort(
+                    Comparator.comparing(InventoryBatch::getArrivalTime)
+            );
+        }
+
+        int remaining = quantity;
+        Iterator<InventoryBatch> iterator = item.getBatches().iterator();
+
+        while (iterator.hasNext() && remaining > 0) {
+
+            InventoryBatch batch = iterator.next();
+
+            int deduct = Math.min(batch.getQuantity(), remaining);
+
+            batch.setQuantity(batch.getQuantity() - deduct);
+            remaining -= deduct;
+
+            if (batch.getQuantity() == 0) iterator.remove();
+        }
+
+        item.setVersion(item.getVersion() + 1);
+
+        if (repository instanceof InventoryRepository repo) {
+            repo.recordTransaction(
+                new StockTransaction(sku, locationId, supplierId,
+                        -quantity, "REMOVE")
+            );
+        }
+
+        if (item.getTotalQuantity() < item.getReorderThreshold()) {
+            exceptionSource.fireResourceExhausted(
+                    200,
+                    "ReorderTrigger",
+                    sku,
+                    item.getReorderThreshold(),
+                    item.getTotalQuantity()
+            );
+        }
+
+        if (item.getTotalQuantity() < item.getSafetyStockLevel()) {
+            exceptionSource.fireResourceExhausted(
+                    201,
+                    "SafetyStockBreach",
+                    sku,
+                    item.getSafetyStockLevel(),
+                    item.getTotalQuantity()
+            );
+        }
+
+        repository.save(item);
+    }
+}
+
+===== FILE: StockOperationStrategy.java =====
+package inventory_subsystem;
+
+public interface StockOperationStrategy {
+
+    void execute(String sku,
+                 String locationId,
+                 String supplierId,
+                 int quantity,
+                 InventoryDataStore repository,
+                 InventoryExceptionSource exceptionSource,
+                 IssuingPolicy policy);
+}
+
+===== FILE: StockTransaction.java =====
+package inventory_subsystem;
+
+import java.time.LocalDateTime;
+
+public class StockTransaction {
+
+    private String sku;
+    private String locationId;
+    private String supplierId;
+
+    private int quantityChange; // +ve for add, -ve for remove
+
+    private String type; // ADD / REMOVE / TRANSFER_IN / TRANSFER_OUT
+
+    private LocalDateTime timestamp;
+
+    public StockTransaction(String sku, String locationId, String supplierId,
+                            int quantityChange, String type) {
+
+        this.sku = sku;
+        this.locationId = locationId;
+        this.supplierId = supplierId;
+        this.quantityChange = quantityChange;
+        this.type = type;
+        this.timestamp = LocalDateTime.now();
+    }
+
+    public String getSku() { return sku; }
+    public String getLocationId() { return locationId; }
+    public String getSupplierId() { return supplierId; }
+    public int getQuantityChange() { return quantityChange; }
+    public String getType() { return type; }
+    public LocalDateTime getTimestamp() { return timestamp; }
+}
+
+===== FILE: Supplier.java =====
+package inventory_subsystem;
+
+public class Supplier {
+
+    private String supplierId;
+    private String name;
+    private int leadTimeDays;
+    private double performanceRating;
+
+    public Supplier(String supplierId, String name,
+                    int leadTimeDays, double performanceRating) {
+
+        this.supplierId = supplierId;
+        this.name = name;
+        this.leadTimeDays = leadTimeDays;
+        this.performanceRating = performanceRating;
+    }
+
+    public String getSupplierId() { return supplierId; }
+    public String getName() { return name; }
+    public int getLeadTimeDays() { return leadTimeDays; }
+    public double getPerformanceRating() { return performanceRating; }
+
+    public void setLeadTimeDays(int leadTimeDays) {
+        this.leadTimeDays = leadTimeDays;
+    }
+
+    public void setPerformanceRating(double performanceRating) {
+        this.performanceRating = performanceRating;
+    }
+}
+
+===== FILE: TransferStockStrategy.java =====
+package inventory_subsystem;
+
+import java.time.LocalDateTime;
+import java.util.*;
+
+public class TransferStockStrategy implements StockOperationStrategy {
+
+    @Override
+    public void execute(String sku, String fromLocation, String supplierId, int quantity,
+                        InventoryDataStore repository,
+                        InventoryExceptionSource exceptionSource,
+                        IssuingPolicy policy) {
+
+        InventoryItem source = repository.find(sku, fromLocation, supplierId);
+
+        if (source == null) {
+            exceptionSource.fireResourceNotFound(
+                    166, "InventoryItem",
+                    sku + "_" + fromLocation + "_" + supplierId);
+            return;
+        }
+
+        if (source.getTotalQuantity() < quantity) {
+            exceptionSource.fireResourceExhausted(
+                    167, "Stock",
+                    sku + "_" + fromLocation + "_" + supplierId,
+                    quantity, source.getTotalQuantity());
+            return;
+        }
+
+        if (policy == IssuingPolicy.FEFO) {
+            source.getBatches().sort(
+                    Comparator.comparing(
+                            b -> b.getExpiryTime() != null
+                                    ? b.getExpiryTime()
+                                    : b.getArrivalTime()
+                    )
+            );
+        } else {
+            source.getBatches().sort(
+                    Comparator.comparing(InventoryBatch::getArrivalTime)
+            );
+        }
+
+        int remaining = quantity;
+        Iterator<InventoryBatch> iterator = source.getBatches().iterator();
+
+        while (iterator.hasNext() && remaining > 0) {
+            InventoryBatch batch = iterator.next();
+
+            int deduct = Math.min(batch.getQuantity(), remaining);
+            batch.setQuantity(batch.getQuantity() - deduct);
+            remaining -= deduct;
+
+            if (batch.getQuantity() == 0) iterator.remove();
+        }
+
+        source.setVersion(source.getVersion() + 1);
+
+        if (repository instanceof InventoryRepository repo) {
+            repo.recordTransaction(
+                new StockTransaction(sku, fromLocation, supplierId,
+                        -quantity, "TRANSFER_OUT")
+            );
+        }
+
+        if (source.getTotalQuantity() < source.getReorderThreshold()) {
+            exceptionSource.fireResourceExhausted(
+                    200,
+                    "ReorderTrigger",
+                    sku,
+                    source.getReorderThreshold(),
+                    source.getTotalQuantity()
+            );
+        }
+
+        if (source.getTotalQuantity() < source.getSafetyStockLevel()) {
+            exceptionSource.fireResourceExhausted(
+                201,
+                "SafetyStockBreach",
+                sku,
+                source.getSafetyStockLevel(),
+                source.getTotalQuantity()
+            );
+        }
+
+        repository.save(source);
+    }
+
+    public void addToDestination(String sku, String toLocation, String supplierId,
+                                int quantity, InventoryDataStore repository) {
+
+        InventoryItem destination = repository.find(sku, toLocation, supplierId);
+
+        if (destination == null) {
+            destination = new InventoryItem(sku, toLocation, supplierId, 0);
+        }
+
+        destination.addBatch(new InventoryBatch(
+                UUID.randomUUID().toString(),
+                quantity,
+                LocalDateTime.now(),
+                null,
+            new ArrayList<>(),
+            0.0
+        ));
+
+        destination.setVersion(destination.getVersion() + 1);
+
+        if (repository instanceof InventoryRepository repo) {
+            repo.recordTransaction(
+                new StockTransaction(sku, toLocation, supplierId,
+                        quantity, "TRANSFER_IN")
+            );
+        }
+
+        if (destination.getTotalQuantity() < destination.getReorderThreshold()) {
+            exceptionSource.fireResourceExhausted(
+                    200,
+                    "ReorderTrigger",
+                    sku,
+                    destination.getReorderThreshold(),
+                    destination.getTotalQuantity()
+            );
+        }
+
+        if (destination.getTotalQuantity() < destination.getSafetyStockLevel()) {
+            exceptionSource.fireResourceExhausted(
+                    201,
+                    "SafetyStockBreach",
+                    sku,
+                    destination.getSafetyStockLevel(),
+                    destination.getTotalQuantity()
+            );
+        }
+
+        repository.save(destination);
+    }
+}
+

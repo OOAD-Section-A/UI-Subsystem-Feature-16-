@@ -1,0 +1,268 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>scm.ui</groupId>
+    <artifactId>scm-nexus-ui</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>SCM Nexus UI Subsystem</name>
+    <description>Feature #16 — Java Swing UI Subsystem for Supply Chain Management (OOAD database)</description>
+
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <mainClass>scm.ui.SCMApplication</mainClass>
+    </properties>
+
+    <dependencies>
+        <!-- MySQL JDBC Driver (OOAD database) -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>8.3.0</version>
+        </dependency>
+
+        <!-- Updated Exception Handler v3 (UI subsystem integration) -->
+        <dependency>
+            <groupId>com.scm</groupId>
+            <artifactId>scm-exception-handler-v3</artifactId>
+            <version>3.0.0</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/lib/scm-exception-handler-v3.jar</systemPath>
+        </dependency>
+        <dependency>
+            <groupId>com.scm</groupId>
+            <artifactId>scm-exception-viewer-gui</artifactId>
+            <version>3.0.0</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/lib/scm-exception-viewer-gui.jar</systemPath>
+        </dependency>
+        <dependency>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna</artifactId>
+            <version>5.18.1</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/lib/jna-5.18.1.jar</systemPath>
+        </dependency>
+        <dependency>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna-platform</artifactId>
+            <version>5.18.1</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/lib/jna-platform-5.18.1.jar</systemPath>
+        </dependency>
+
+        <!--
+            ══════════════════════════════════════════════════════════════════
+            Demand Forecasting Subsystem JAR  (Feature integration)
+            ──────────────────────────────────────────────────────────────────
+            Place the JAR at:  SCM_UI/lib/demand-forecasting-1.0-SNAPSHOT.jar
+
+            The JAR exposes the query layer:
+              com.forecast.services.query.ForecastQueryService
+              com.forecast.services.query.ForecastSeriesResponseDto
+              com.forecast.services.query.ForecastPointDto
+
+            It connects to: jdbc:mysql://localhost:3306/ooad
+            Credentials from target/classes/database.properties:
+              db.username = root
+              db.password = anurag10
+            ══════════════════════════════════════════════════════════════════
+        -->
+        <dependency>
+            <groupId>com.forecast</groupId>
+            <artifactId>demand-forecasting</artifactId>
+            <version>1.0-SNAPSHOT</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/lib/demand-forecasting-1.0-SNAPSHOT.jar</systemPath>
+        </dependency>
+
+        <!-- ══════════════════════════════════════════════════════════════
+             Real-Time Delivery Monitoring JAR  (Team Ramen Noodles #9)
+             ──────────────────────────────────────────────────────────────
+             Place the JAR at:  SCM_UI/lib/ramen-noodles-delivery-monitoring.jar
+             ══════════════════════════════════════════════════════════════ -->
+        <dependency>
+            <groupId>com.ramennoodles</groupId>
+            <artifactId>ramen-noodles-delivery-monitoring</artifactId>
+            <version>1.0.0</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/lib/ramen-noodles-delivery-monitoring.jar</systemPath>
+        </dependency>
+        <dependency>
+            <groupId>com.jackfruit.scm</groupId>
+            <artifactId>database-module</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/lib/database-module-1.0.0-SNAPSHOT-standalone.jar</systemPath>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <id>add-inventory-subsystem-source</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>add-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>src/main/inventory_subsystem</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Compile -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.11.0</version>
+                <configuration>
+                    <source>17</source>
+                    <target>17</target>
+                </configuration>
+            </plugin>
+
+            <!-- Fat JAR with all dependencies including the forecast JAR -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.5.1</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>${mainClass}</mainClass>
+                                </transformer>
+                            </transformers>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Unpack system-scoped forecasting JAR so packaged app can run standalone -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.6.1</version>
+                <executions>
+                    <execution>
+                        <id>unpack-exception-handler-dependency</id>
+                        <phase>process-classes</phase>
+                        <goals>
+                            <goal>unpack-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <includeGroupIds>com.scm</includeGroupIds>
+                            <includeArtifactIds>scm-exception-handler-v3</includeArtifactIds>
+                            <includeScope>system</includeScope>
+                            <excludeTransitive>true</excludeTransitive>
+                            <outputDirectory>${project.build.outputDirectory}</outputDirectory>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>unpack-exception-viewer-dependency</id>
+                        <phase>process-classes</phase>
+                        <goals>
+                            <goal>unpack-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <includeGroupIds>com.scm</includeGroupIds>
+                            <includeArtifactIds>scm-exception-viewer-gui</includeArtifactIds>
+                            <includeScope>system</includeScope>
+                            <excludeTransitive>true</excludeTransitive>
+                            <outputDirectory>${project.build.outputDirectory}</outputDirectory>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>unpack-jna-dependency</id>
+                        <phase>process-classes</phase>
+                        <goals>
+                            <goal>unpack-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <includeGroupIds>net.java.dev.jna</includeGroupIds>
+                            <includeArtifactIds>jna</includeArtifactIds>
+                            <includeScope>system</includeScope>
+                            <excludeTransitive>true</excludeTransitive>
+                            <outputDirectory>${project.build.outputDirectory}</outputDirectory>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>unpack-jna-platform-dependency</id>
+                        <phase>process-classes</phase>
+                        <goals>
+                            <goal>unpack-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <includeGroupIds>net.java.dev.jna</includeGroupIds>
+                            <includeArtifactIds>jna-platform</includeArtifactIds>
+                            <includeScope>system</includeScope>
+                            <excludeTransitive>true</excludeTransitive>
+                            <outputDirectory>${project.build.outputDirectory}</outputDirectory>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>unpack-database-module-dependency</id>
+                        <phase>process-classes</phase>
+                        <goals>
+                            <goal>unpack-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <includeGroupIds>com.jackfruit.scm</includeGroupIds>
+                            <includeArtifactIds>database-module</includeArtifactIds>
+                            <includeScope>system</includeScope>
+                            <excludeTransitive>true</excludeTransitive>
+                            <outputDirectory>${project.build.outputDirectory}</outputDirectory>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>unpack-forecast-system-dependency</id>
+                        <phase>process-classes</phase>
+                        <goals>
+                            <goal>unpack-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <includeGroupIds>com.forecast</includeGroupIds>
+                            <includeArtifactIds>demand-forecasting</includeArtifactIds>
+                            <includeScope>system</includeScope>
+                            <excludeTransitive>true</excludeTransitive>
+                            <outputDirectory>${project.build.outputDirectory}</outputDirectory>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>unpack-delivery-monitoring-dependency</id>
+                        <phase>process-classes</phase>
+                        <goals>
+                            <goal>unpack-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <includeGroupIds>com.ramennoodles</includeGroupIds>
+                            <includeArtifactIds>ramen-noodles-delivery-monitoring</includeArtifactIds>
+                            <includeScope>system</includeScope>
+                            <excludeTransitive>true</excludeTransitive>
+                            <outputDirectory>${project.build.outputDirectory}</outputDirectory>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
